@@ -9,18 +9,18 @@
 //! groups which contains all user scripts, configs and scripts, these are used to label them on tuckr
 //! so you can add or remove them anytime
 
-mod dotfiles;
-mod fileops;
-mod hooks;
-mod secrets;
-mod symlinks;
+pub mod dotfiles;
+pub mod fileops;
+pub mod hooks;
+pub mod secrets;
+pub mod symlinks;
 
 use clap::Parser;
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
 #[command(about, author, version, propagate_version = true)]
-enum Cli {
+pub enum Cli {
     #[command(alias = "s")]
     /// Get dotfiles' symlinking status (alias: s)
     Status {
