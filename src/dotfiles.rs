@@ -172,7 +172,6 @@ impl Dotfile {
 /// When run on a unit test it returns a temporary directory for testing purposes
 pub fn get_dotfiles_path() -> Result<path::PathBuf, String> {
     let home_dotfiles = dirs::home_dir().unwrap().join(".dotfiles");
-    let config_dotfiles = dirs::config_dir().unwrap().join("dotfiles");
 
     if cfg!(test) {
         Ok(std::env::temp_dir()
@@ -180,15 +179,13 @@ pub fn get_dotfiles_path() -> Result<path::PathBuf, String> {
             .join("dotfiles"))
     } else if home_dotfiles.exists() {
         Ok(home_dotfiles)
-    } else if config_dotfiles.exists() {
-        Ok(config_dotfiles)
     } else {
         Err(format!(
             "{}\n\n\
             Make sure a `{}` directory exists.\n\
             Or use `tuckr init`.",
             "Couldn't find dotfiles directory.".yellow(),
-            config_dotfiles.display(),
+            home_dotfiles.display(),
         ))
     }
 }
