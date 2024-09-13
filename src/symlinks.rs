@@ -19,23 +19,25 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use tabled::{Table, Tabled};
 
-fn symlink_file(f: PathBuf) {
+fn symlink_file(f: PathBuf) -> Option<String>{
+    let mut output = "".to_string();
     match Dotfile::try_from(f.clone()) {
         Ok(group) => {
             let target_path = group.to_target_path();
             if target_path.exists() {
-                return;
+                return None;
             }
 
             #[cfg(target_family = "unix")]
             {
                 if let Err(err) = std::os::unix::fs::symlink(f, target_path) {
-                    eprintln!(
+                    output.push_str(&format!(
                         "failed to symlink group `{}`: {}",
                         group.group_name,
-                        err.red()
-                    );
-                }
+                        err,
+                    ));
+                    return Some(output);
+                } else { None }
             }
 
             #[cfg(target_family = "windows")]
@@ -57,8 +59,9 @@ fn symlink_file(f: PathBuf) {
         }
 
         Err(err) => {
-            eprintln!("{}", err);
-            eprintln!("Failed to link {}.", f.to_str().unwrap());
+            output.push_str(&err);
+            output.push_str(&format!("Failed to link {}.", f.to_str().unwrap()));
+            Some(output)
         }
     }
 }
@@ -247,8 +250,9 @@ impl SymlinkHandler {
     }
 
     /// Symlinks all the files of a group to the user's $HOME
-    fn add(&self, group: &str) {
+    fn add<'a>(&self, group: &'a str, output: &mut String) {
         let Some(groups) = self.get_related_conditional_groups(group, false) else {
+            output.push_str("No target_group or any of its conditional groups are valid on the current platform");
             return;
         };
 
@@ -256,19 +260,19 @@ impl SymlinkHandler {
             let group = Dotfile::try_from(self.dotfiles_dir.join("Configs").join(&group)).unwrap();
             if group.path.exists() {
                 // iterate through all the files in group_dir
-                group.map(|f| symlink_file(f.path));
+                group.map(|f| { symlink_file(f.path); } );
             } else {
-                eprintln!(
+                output.push_str(&format!(
                     "{} {}",
                     "There's no dotfiles for".red(),
                     group.group_name.red()
-                );
+                ))
             }
         }
     }
 
     /// Deletes symlinks from $HOME if they're owned by dotfiles dir
-    fn remove(&self, group: &str) {
+    fn remove(&self, group: &str, output: &mut String) {
         fn remove_symlink(file: PathBuf) {
             let dotfile = Dotfile::try_from(file).unwrap();
             let target_dotfile = dotfile.to_target_path();
@@ -283,9 +287,11 @@ impl SymlinkHandler {
             if target_dotfile.is_dir() {
                 fs::remove_dir_all(&target_dotfile).unwrap();
             } else {
-                fs::remove_file(&target_dotfile)
-                    .map_err(|err| format!("error with path `{}`: {err}", target_dotfile.display()))
-                    .unwrap();
+                match fs::remove_file(&target_dotfile)
+                .map_err(|err| format!("error with path `{}`: {err}", target_dotfile.display())) {
+                    Ok(()) => (),
+                    Err(s) => {|output: &mut String| output.push_str(&s); ()}
+                }
             }
         }
 
@@ -321,10 +327,11 @@ fn foreach_group<F>(
     groups: &[String],
     exclude: &[String],
     symlinked: bool,
+    output: &mut String,
     func: F,
 ) -> Result<(), ExitCode>
 where
-    F: Fn(&SymlinkHandler, &String),
+    F: Fn(&SymlinkHandler, &String, &mut String),
 {
     // loads the runtime information needed to carry out actions
     let sym = SymlinkHandler::try_new()?;
@@ -353,7 +360,7 @@ where
             }
             // do something with the group name
             // passing the sym context
-            func(&sym, group);
+            func(&sym, group, output);
         }
 
         return Ok(());
@@ -363,7 +370,7 @@ where
         if exclude.contains(group) {
             continue;
         }
-        func(&sym, group);
+        func(&sym, group, output);
     }
 
     Ok(())
@@ -375,13 +382,7 @@ pub fn add_cmd(
     exclude: &[String],
     force: bool,
     adopt: bool,
-) -> Result<(), ExitCode> {
-    if force {
-        print!("Are you sure you want to override conflicts? (N/y) ");
-    } else if adopt {
-        print!("Are you sure you want to adopt conflicts? (N/y) ");
-    }
-
+) -> Result<String, ExitCode> {
     if force || adopt {
         std::io::stdout()
             .flush()
@@ -394,11 +395,13 @@ pub fn add_cmd(
 
         match answer.trim().to_lowercase().as_str() {
             "y" | "yes" => (),
-            _ => return Ok(()),
+            _ => return Ok("".into()),
         }
     }
 
-    foreach_group(groups, exclude, true, |sym, group| {
+    let mut output = "".to_string();
+
+    foreach_group(groups, exclude, true, &mut output, |sym: &SymlinkHandler, group, mut output| {
         // Symlink dotfile by force
         if force {
             let remove_overlapping_files = |status_group: &HashCache| {
@@ -447,16 +450,18 @@ pub fn add_cmd(
             adopt_overlapping_files(&sym.not_symlinked);
         }
 
-        sym.add(group)
+        &sym.add(group, &mut output);
     })?;
 
-    Ok(())
+    Ok(output)
 }
 
 /// Removes symlinks
-pub fn remove_cmd(groups: &[String], exclude: &[String]) -> Result<(), ExitCode> {
-    foreach_group(groups, exclude, false, |sym, p| sym.remove(p))?;
-    Ok(())
+pub fn remove_cmd(groups: &[String], exclude: &[String]) -> Result<String, ExitCode> {
+    let mut output: String = "".into();
+    foreach_group(groups, exclude, false, &mut output,
+        |sym, p, mut output| sym.remove(p, &mut output))?;
+    Ok("".into())
 }
 
 /// returns a cache with files in dotfiles that already exist in $HOME
@@ -479,7 +484,7 @@ fn get_conflicts_in_cache(cache: &HashCache) -> HashCache {
     conflicts
 }
 
-fn print_global_status(sym: &SymlinkHandler) -> Result<(), ExitCode> {
+fn print_global_status(sym: &SymlinkHandler) -> Result<String, ExitCode> {
     #[derive(Tabled, Debug)]
     struct SymlinkRow<'a> {
         #[tabled(rename = "Symlinked")]
@@ -488,6 +493,7 @@ fn print_global_status(sym: &SymlinkHandler) -> Result<(), ExitCode> {
         #[tabled(rename = "Not Symlinked")]
         not_symlinked: &'a str,
     }
+    let mut output = "".to_string();
 
     // --- process status from symlink ---
     // groups that are both in symlinked and not_symlinked
@@ -584,21 +590,22 @@ fn print_global_status(sym: &SymlinkHandler) -> Result<(), ExitCode> {
     };
 
     final_table.with(Style::empty()).with(Alignment::center());
-    println!("{final_table}");
+    output.push_str(&(final_table.to_string() + "\n"));
 
     if !conflicts.is_empty() {
-        println!("\nTo learn more about conflicting dotfiles run: `tuckr status <group...>`")
+        output.push_str("\nTo learn more about conflicting dotfiles run: `tuckr status <group...>`");
     }
 
     // Determines exit code for the command based on the dotfiles' status
     if !symlinked.is_empty() && not_symlinked.is_empty() && conflicts.is_empty() {
-        Ok(())
+        Ok(output)
     } else {
         Err(ExitCode::FAILURE)
     }
 }
 
-fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<(), ExitCode> {
+fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<String, ExitCode> {
+    let mut output = "".to_string();
     let get_related_groups =
         |sym: &SymlinkHandler, not_symlinked_groups: Option<&Vec<String>>| -> Vec<String> {
             let mut related_groups = Vec::new();
@@ -700,47 +707,47 @@ fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<(), 
     if !unsupported.is_empty() {
         println!("Not supported on this platform:");
         for group in unsupported {
-            println!("\t{}", group.yellow());
-        }
-        println!();
+            output.push_str(&format!("\t{}", group));
+        };
     }
 
     let invalid_groups = dotfiles::check_invalid_groups(DotfileType::Configs, &groups);
     if let Some(invalid_groups) = &invalid_groups {
-        eprintln!("Following groups do not exist:");
+        output.push_str("Following groups do not exist:");
         for group in invalid_groups {
-            eprintln!("\t{}", group.red());
+            output.push_str(&format!("\t{}", group));
         }
         println!();
     }
 
     if !not_symlinked.is_empty() {
-        println!("Check `tuckr help add` to learn how to fix symlinks.");
+        output.push_str("Check `tuckr help add` to learn how to fix symlinks.");
     }
 
     if invalid_groups.is_none() {
         return Err(ReturnCode::NoSetupFolder.into());
     }
 
-    Ok(())
+    Ok(output)
 }
 
 /// Prints symlinking status
-pub fn status_cmd(groups: Option<Vec<String>>) -> Result<(), ExitCode> {
+pub fn status_cmd(groups: Option<Vec<String>>) -> Result<String, ExitCode> {
+    let mut output = "".to_string();
     let sym = SymlinkHandler::try_new()?;
 
     if sym.is_empty() {
-        println!("{}", "No dotfiles have been setup yet".yellow());
+        output.push_str("No dotfiles have been setup yet");
         println!("To get started: add dotfiles using `tuckr push` or add them manually to dotfiles/Configs.");
         return Err(ReturnCode::NoSetupFolder.into());
     }
 
     match groups {
-        Some(groups) => print_groups_status(&sym, groups)?,
-        None => print_global_status(&sym)?,
+        Some(groups) => output.push_str(&print_groups_status(&sym, groups)?),
+        None => output.push_str(&print_global_status(&sym)?),
     }
 
-    Ok(())
+    Ok(output)
 }
 
 #[cfg(test)]

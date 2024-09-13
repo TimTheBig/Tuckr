@@ -41,13 +41,10 @@ impl SecretsHandler {
     }
 
     /// takes a path to a file and returns its encrypted content
-    fn encrypt(&self, dotfile: &str) -> Result<Vec<u8>, ExitCode> {
+    fn encrypt(&self, dotfile: &str, output: &mut String) -> Result<Vec<u8>, ExitCode> {
         let cipher = XChaCha20Poly1305::new(&self.key);
         let Ok(dotfile) = fs::read(dotfile) else {
-            eprintln!(
-                "{}",
-                format!("{} {}", "No such file or directory: ", dotfile).red()
-            );
+            output.push_str(&format!("{} {}", "No such file or directory: ", dotfile));
             return Err(ReturnCode::NoSuchFileOrDir.into());
         };
 
@@ -79,7 +76,8 @@ impl SecretsHandler {
 }
 
 /// Encrypts secrets
-pub fn encrypt_cmd(group: &str, dotfiles: &[String]) -> Result<(), ExitCode> {
+pub fn encrypt_cmd(group: &str, dotfiles: &[String]) -> Result<String, ExitCode> {
+    let mut output = "".into();
     let handler = SecretsHandler::try_new()?;
 
     let dest_dir = handler.dotfiles_dir.join("Secrets").join(group);
@@ -101,7 +99,7 @@ pub fn encrypt_cmd(group: &str, dotfiles: &[String]) -> Result<(), ExitCode> {
             tf
         };
 
-        let mut encrypted = handler.encrypt(dotfile)?;
+        let mut encrypted = handler.encrypt(dotfile, &mut output)?;
         let mut encrypted_file = handler.nonce.to_vec();
 
         // makes sure all parent directories of the dotfile are created
@@ -112,25 +110,26 @@ pub fn encrypt_cmd(group: &str, dotfiles: &[String]) -> Result<(), ExitCode> {
         fs::write(dest_dir.join(target_file), encrypted_file).unwrap();
     }
 
-    Ok(())
+    Ok(output)
 }
 
 /// Decrypts secrets
-pub fn decrypt_cmd(groups: &[String], exclude: &[String]) -> Result<(), ExitCode> {
+pub fn decrypt_cmd(groups: &[String], exclude: &[String]) -> Result<String, ExitCode> {
+    let mut output: String = "".into();
     let handler = SecretsHandler::try_new()?;
 
     if let Some(invalid_groups) =
         dotfiles::check_invalid_groups(dotfiles::DotfileType::Secrets, groups)
     {
         for group in invalid_groups {
-            eprintln!("{}", format!("{group} does not exist.").red());
+            output.push_str(&format!("{group} does not exist."));
         }
         return Err(ReturnCode::DecryptionFailed.into());
     }
 
     let dest_dir = std::env::current_dir().unwrap();
 
-    let decrypt_group = |group: Dotfile| -> Result<(), ExitCode> {
+    let mut decrypt_group = |group: Dotfile, output: &mut String| -> Result<(), ExitCode> {
         if exclude.contains(&group.group_name) || !group.is_valid_target() {
             return Ok(());
         }
@@ -138,7 +137,7 @@ pub fn decrypt_cmd(groups: &[String], exclude: &[String]) -> Result<(), ExitCode
         let group_dir = handler.dotfiles_dir.join("Secrets").join(&group.group_path);
         for secret in WalkDir::new(group_dir) {
             let Ok(secret) = secret else {
-                eprintln!("{}", (group.group_name + " does not exist.").red());
+                output.push_str(&(group.group_name + " does not exist."));
                 return Err(ReturnCode::NoSetupFolder.into());
             };
 
@@ -158,23 +157,23 @@ pub fn decrypt_cmd(groups: &[String], exclude: &[String]) -> Result<(), ExitCode
         let groups_dir = handler.dotfiles_dir.join("Secrets");
         for group in fs::read_dir(groups_dir).unwrap() {
             let Ok(group) = Dotfile::try_from(group.unwrap().path()) else {
-                eprintln!("Received an invalid group path.");
+                output.push_str("Received an invalid group path.");
                 return Err(ExitCode::FAILURE);
             };
-            decrypt_group(group)?;
+            decrypt_group(group, &mut output)?;
         }
 
-        return Ok(());
+        return Ok(output);
     }
 
     for group in groups {
         let group = handler.dotfiles_dir.join("Secrets").join(group);
         let Ok(group) = Dotfile::try_from(group) else {
-            eprintln!("Received an invalid group path.");
+            output.push_str("Received an invalid group path.");
             return Err(ExitCode::FAILURE);
         };
-        decrypt_group(group)?;
+        decrypt_group(group, &mut output)?;
     }
 
-    Ok(())
+    Ok(output)
 }

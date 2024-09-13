@@ -15,7 +15,7 @@ use std::process::{Command, ExitCode};
 
 /// Prints a single row info box with title on the left
 /// and content on the right
-fn print_info_box(title: &str, content: &str) {
+fn print_info_box(title: &str, content: &str) -> String {
     let mut hook_box = tabled::builder::Builder::default()
         .set_columns([title])
         .add_record([content])
@@ -25,6 +25,8 @@ fn print_info_box(title: &str, content: &str) {
         .with(tabled::Rotate::Left)
         .with(tabled::Style::rounded().off_vertical());
     println!("{hook_box}");
+
+    hook_box.to_string()
 }
 
 #[derive(Debug, PartialEq)]
@@ -67,7 +69,7 @@ impl Iterator for DeployStages {
 }
 
 /// Runs hooks of type PreHook or PostHook
-fn run_hook(group: &str, hook_type: DeployStep) -> Result<(), ExitCode> {
+fn run_hook(group: &str, hook_type: DeployStep) -> Result<String, ExitCode> {
     let dotfiles_dir = match dotfiles::get_dotfiles_path() {
         Ok(dir) => dir,
         Err(e) => {
@@ -77,8 +79,9 @@ fn run_hook(group: &str, hook_type: DeployStep) -> Result<(), ExitCode> {
     };
 
     let group_dir = PathBuf::from(&dotfiles_dir).join("Hooks").join(group);
+    let mut str_output = "".to_string();
     let Ok(group_dir) = fs::read_dir(group_dir) else {
-        eprintln!("{}", "Could not read Hooks, folder may not exist or does not have the appropriate permissions".red());
+        str_output.push_str("Could not read Hooks, folder may not exist or does not have the appropriate permissions");
         return Err(ReturnCode::NoSetupFolder.into());
     };
 
@@ -107,21 +110,21 @@ fn run_hook(group: &str, hook_type: DeployStep) -> Result<(), ExitCode> {
         let mut output = match Command::new(file).spawn() {
             Ok(output) => output,
             Err(e) => {
-                eprintln!("{e}");
+                str_output.push_str(&e.to_string());
                 return Err(ExitCode::FAILURE);
             }
         };
 
         if !output.wait().unwrap().success() {
-            print_info_box(
+            str_output.push_str(&print_info_box(
                 "Failed to hook".red().to_string().as_str(),
                 format!("{group} {filename}").as_str(),
-            );
+            ));
             return Err(ExitCode::FAILURE);
         }
     }
 
-    Ok(())
+    Ok(str_output)
 }
 
 /// Runs hooks for specified groups
@@ -130,7 +133,8 @@ pub fn set_cmd(
     exclude: &[String],
     force: bool,
     adopt: bool,
-) -> Result<(), ExitCode> {
+) -> Result<String, ExitCode> {
+    let mut output = "".to_string();
     if let Some(invalid_groups) =
         dotfiles::check_invalid_groups(dotfiles::DotfileType::Hooks, groups)
     {
@@ -141,32 +145,34 @@ pub fn set_cmd(
         return Err(ReturnCode::NoSuchFileOrDir.into());
     }
 
-    let run_deploy_steps = |step: DeployStages, group: Dotfile| -> Result<(), ExitCode> {
+    let run_deploy_steps = |step: DeployStages, group: Dotfile| -> Result<String, ExitCode> {
+        let mut output = "".to_string();
         if !group.is_valid_target() {
-            return Ok(());
+            return Ok("Not a valid targit".into());
         }
 
         for i in step {
             match i {
-                DeployStep::Initialize => return Ok(()),
+                DeployStep::Initialize => return Ok(output),
 
                 DeployStep::PreHook => {
                     run_hook(&group.group_name, DeployStep::PreHook)?;
                 }
 
                 DeployStep::Symlink => {
+                    output.push_str(&format!("{}\n{}",
                     print_info_box(
                         "Symlinking group",
                         group.group_name.yellow().to_string().as_str(),
-                    );
-                    symlinks::add_cmd(groups, exclude, force, adopt)?;
+                    ),
+                    symlinks::add_cmd(groups, exclude, force, adopt)?))
                 }
 
-                DeployStep::PostHook => run_hook(&group.group_name, DeployStep::PostHook)?,
+                DeployStep::PostHook => { run_hook(&group.group_name, DeployStep::PostHook)?; },
             }
         }
 
-        Ok(())
+        Ok(output)
     };
 
     let hooks_dir = match dotfiles::get_dotfiles_path() {
@@ -181,31 +187,33 @@ pub fn set_cmd(
         for folder in fs::read_dir(hooks_dir).unwrap() {
             let folder = folder.unwrap().path();
             let Ok(group) = Dotfile::try_from(folder.clone()) else {
-                eprintln!(
-                    "{}",
-                    format!("Got an invalid group: {}", folder.display()).red()
-                );
+                output.push_str("Got an invalid group: ");
+                output.push_str(folder.to_str().unwrap_or(""));
                 return Err(ExitCode::FAILURE);
             };
-            run_deploy_steps(DeployStages::new(), group)?;
+            match run_deploy_steps(DeployStages::new(), group) {
+                Ok(o) => { output.push_str(&o); return Ok(output); },
+                Err(e) => return Err(e),
+            };
         }
 
-        return Ok(());
+        return Ok(output);
     }
 
     for group in groups {
         let hook_path = hooks_dir.join(group);
         let Ok(group) = Dotfile::try_from(hook_path.clone()) else {
-            eprintln!(
-                "{}",
-                format!("Got an invalid group: {}", hook_path.display()).red()
-            );
+            output.push_str("Got an invalid group: ");
+            output.push_str(hook_path.to_str().unwrap_or(""));
             return Err(ExitCode::FAILURE);
         };
-        run_deploy_steps(DeployStages::new(), group)?;
+        match run_deploy_steps(DeployStages::new(), group) {
+            Ok(o) => { output.push_str(&o); return Ok(output); },
+            Err(e) => return Err(e),
+        };
     }
 
-    Ok(())
+    Ok(output)
 }
 
 #[cfg(test)]

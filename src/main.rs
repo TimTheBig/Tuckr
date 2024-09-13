@@ -125,7 +125,7 @@ pub enum Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let exit_code = match cli {
+    let exit_code: Result<String, ExitCode> = match cli {
         Cli::Set {
             groups,
             exclude,
