@@ -6,6 +6,7 @@ use crate::dotfiles;
 use crate::fileops;
 use std::env;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::{
     path::{self, Component},
     process,
@@ -28,9 +29,9 @@ pub const VALID_TARGETS: &[&str] = &[
     "_windows",
 ];
 
-// Exit codes
+/// Exit codes
 /// Couldn't find the dotfiles directory
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ReturnCode {
     CouldntFindDotfiles = 2,
     /// No Configs/Hooks/Secrets folder setup
@@ -41,11 +42,26 @@ pub enum ReturnCode {
     EncryptionFailed = 5,
     /// Failed to decrypt referenced file
     DecryptionFailed = 6,
+    /// Failed to Symlink
+    CouldntSymlinkFile = 7,
 }
 
 impl From<ReturnCode> for process::ExitCode {
     fn from(value: ReturnCode) -> Self {
         Self::from(value as u8)
+    }
+}
+
+impl std::fmt::Display for ReturnCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReturnCode::CouldntFindDotfiles => write!(f, "Couldn't Find Dotfiles"),
+            ReturnCode::NoSetupFolder => write!(f, "No Setup Folder"),
+            ReturnCode::NoSuchFileOrDir => write!(f, "No Such File Or Dir"),
+            ReturnCode::EncryptionFailed => write!(f, "Encryption Failed"),
+            ReturnCode::DecryptionFailed => write!(f, "Decryption Failed"),
+            ReturnCode::CouldntSymlinkFile => write!(f, "Couldn't Symlink File"),
+        }
     }
 }
 
@@ -60,9 +76,10 @@ impl TryFrom<path::PathBuf> for Dotfile {
     type Error = String;
 
     fn try_from(value: path::PathBuf) -> Result<Self, Self::Error> {
+        let mut output: String = "".into();
         /// Extracts group name from tuckr directories
-        pub fn to_group_path(group_path: &path::PathBuf) -> Result<path::PathBuf, String> {
-            let dotfiles_dir = get_dotfiles_path()?;
+        pub fn to_group_path(group_path: &path::PathBuf, output: &mut String) -> Result<path::PathBuf, ReturnCode> {
+            let dotfiles_dir = get_dotfiles_path(output)?;
             let configs_dir = dotfiles_dir.join("Configs");
             let hooks_dir = dotfiles_dir.join("Hooks");
             let secrets_dir = dotfiles_dir.join("Secrets");
@@ -74,7 +91,8 @@ impl TryFrom<path::PathBuf> for Dotfile {
             } else if group_path.starts_with(&secrets_dir) {
                 secrets_dir
             } else {
-                return Err("path does not belong to dotfiles.".into());
+                output.push_str("path does not belong to dotfiles.");
+                return Err(ReturnCode::NoSuchFileOrDir);
             };
 
             let group = if *group_path == dotfile_root_dir {
@@ -87,7 +105,8 @@ impl TryFrom<path::PathBuf> for Dotfile {
                     .next()
                     .unwrap()
                 else {
-                    return Err("failed to get group path relative to dotfile dir.".into());
+                    output.push_str("failed to get group path relative to dotfile dir.");
+                    return Err(ReturnCode::NoSuchFileOrDir);
                 };
 
                 Ok(dotfile_root_dir.join(group_relpath))
@@ -96,7 +115,10 @@ impl TryFrom<path::PathBuf> for Dotfile {
             group
         }
 
-        let group_path = to_group_path(&value)?;
+        let group_path = match to_group_path(&value, &mut output) {
+            Ok(p) => p,
+            Err(_) => return Err(output),
+        };
 
         Ok(Dotfile {
             group_name: group_path.file_name().unwrap().to_str().unwrap().into(),
@@ -128,16 +150,16 @@ impl Dotfile {
     }
 
     /// Checks whether the current groups is targetting the root path aka `/`
-    pub fn targets_root(&self) -> bool {
-        let root_dir = get_dotfiles_path().unwrap().join("Configs").join("Root");
+    pub fn targets_root(&self, output: &mut String) -> bool {
+        let root_dir = get_dotfiles_path(output).unwrap().join("Configs").join("Root");
         self.group_path.starts_with(root_dir)
     }
 
     /// Converts a path string from dotfiles/Configs to where they should be
     /// deployed on $HOME
-    pub fn to_target_path(&self) -> path::PathBuf {
+    pub fn to_target_path(&self, output: &mut String) -> path::PathBuf {
         // uses join("") so that the path appends / or \ depending on platform
-        let dotfiles_configs_path = get_dotfiles_path().unwrap().join("Configs").join("");
+        let dotfiles_configs_path = get_dotfiles_path(output).unwrap().join("Configs").join("");
         let dotfiles_configs_path = dotfiles_configs_path.to_str().unwrap();
         let group_path = self.path.clone();
         let group_path = {
@@ -149,7 +171,7 @@ impl Dotfile {
             }
         };
 
-        if self.targets_root() {
+        if self.targets_root(output) {
             path::PathBuf::from(path::MAIN_SEPARATOR_STR).join(group_path)
         } else {
             dirs::home_dir().unwrap().join(group_path)
@@ -171,7 +193,7 @@ impl Dotfile {
 /// Returns an Option<String> with the path to of the tuckr dotfiles directory
 ///
 /// When run on a unit test it returns a temporary directory for testing purposes
-pub fn get_dotfiles_path() -> Result<path::PathBuf, String> {
+pub fn get_dotfiles_path(output: &mut String) -> Result<path::PathBuf, ReturnCode> {
     let home_dotfiles = dirs::home_dir().unwrap().join(".dotfiles");
 
     if cfg!(test) {
@@ -181,13 +203,14 @@ pub fn get_dotfiles_path() -> Result<path::PathBuf, String> {
     } else if home_dotfiles.exists() {
         Ok(home_dotfiles)
     } else {
-        Err(format!(
+        output.push_str(&format!(
             "{}\n\n\
             Make sure a `{}` directory exists.\n\
             Or use `tuckr init`.",
-            "Couldn't find dotfiles directory.".yellow(),
+            "Couldn't find dotfiles directory.",
             home_dotfiles.display(),
-        ))
+        ));
+        Err(ReturnCode::CouldntFindDotfiles)
     }
 }
 
@@ -204,14 +227,14 @@ pub enum DotfileType {
 }
 
 /// Returns if a config has been setup for <group> on <dtype>
-pub fn dotfile_contains(dtype: DotfileType, group: &str) -> bool {
+pub fn dotfile_contains(dtype: DotfileType, group: &str, output: &mut String) -> bool {
     let target_dir = match dtype {
         DotfileType::Configs => "Configs",
         DotfileType::Secrets => "Secrets",
         DotfileType::Hooks => "Hooks",
     };
 
-    let Ok(dotfiles_dir) = get_dotfiles_path() else {
+    let Ok(dotfiles_dir) = get_dotfiles_path(output) else {
         return false;
     };
     let group_src = dotfiles_dir.join(target_dir).join(group);
@@ -219,10 +242,10 @@ pub fn dotfile_contains(dtype: DotfileType, group: &str) -> bool {
 }
 
 /// Returns all groups in the slice that don't have a corresponding directory in dotfiles/{Configs,Hooks,Secrets}
-pub fn check_invalid_groups(dtype: DotfileType, groups: &[String]) -> Option<Vec<String>> {
+pub fn check_invalid_groups(dtype: DotfileType, groups: &[String], output: &mut String) -> Option<Vec<String>> {
     let mut invalid_groups = Vec::new();
     for group in groups {
-        if !dotfiles::dotfile_contains(dtype, group) && group != "*" {
+        if !dotfiles::dotfile_contains(dtype, group, output) && group != "*" {
             invalid_groups.push(group.clone());
         }
     }
@@ -240,27 +263,27 @@ mod tests {
 
     #[test]
     fn dotfile_to_target_path() {
-        let group = get_dotfiles_path()
+        let group = get_dotfiles_path(&mut "".into())
             .unwrap()
             .join("Configs")
             .join("zsh")
             .join(".zshrc");
 
         assert_eq!(
-            Dotfile::try_from(group).unwrap().to_target_path(),
+            Dotfile::try_from(group).unwrap().to_target_path(&mut "".into()),
             dirs::home_dir().unwrap().join(".zshrc")
         );
     }
 
     #[test]
     fn dotfile_targets_root() {
-        let dotfiles_dir = super::get_dotfiles_path().unwrap().join("Configs");
+        let dotfiles_dir = super::get_dotfiles_path(&mut "".into()).unwrap().join("Configs");
 
         let root_dotfile = super::Dotfile::try_from(dotfiles_dir.join("Root")).unwrap();
-        assert!(root_dotfile.targets_root());
+        assert!(root_dotfile.targets_root(&mut "".into()));
 
         let nonroot_dotfile = super::Dotfile::try_from(dotfiles_dir.join("Zsh")).unwrap();
-        assert!(!nonroot_dotfile.targets_root());
+        assert!(!nonroot_dotfile.targets_root(&mut "".into()));
     }
 
     #[test]

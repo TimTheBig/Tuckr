@@ -19,13 +19,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use tabled::{Table, Tabled};
 
-fn symlink_file(f: PathBuf) -> Option<String>{
-    let mut output = "".to_string();
+fn symlink_file(f: PathBuf, output: &mut String) -> Result<(), ReturnCode> {
     match Dotfile::try_from(f.clone()) {
         Ok(group) => {
-            let target_path = group.to_target_path();
+            let target_path = group.to_target_path(output);
             if target_path.exists() {
-                return None;
+                return Err(ReturnCode::CouldntSymlinkFile);
             }
 
             #[cfg(target_family = "unix")]
@@ -36,8 +35,8 @@ fn symlink_file(f: PathBuf) -> Option<String>{
                         group.group_name,
                         err,
                     ));
-                    return Some(output);
-                } else { None }
+                    return Ok(());
+                } else { Err(ReturnCode::CouldntSymlinkFile) }
             }
 
             #[cfg(target_family = "windows")]
@@ -49,11 +48,11 @@ fn symlink_file(f: PathBuf) -> Option<String>{
                 };
 
                 if let Err(err) = result {
-                    eprintln!(
+                    output.push_str(format!(
                         "failed to symlink group `{}`: {}",
                         group.group_name,
-                        err.red()
-                    );
+                        err,
+                    ));
                 }
             }
         }
@@ -61,7 +60,7 @@ fn symlink_file(f: PathBuf) -> Option<String>{
         Err(err) => {
             output.push_str(&err);
             output.push_str(&format!("Failed to link {}.", f.to_str().unwrap()));
-            Some(output)
+            Ok(())
         }
     }
 }
@@ -78,11 +77,11 @@ struct SymlinkHandler {
 
 impl SymlinkHandler {
     /// Initializes SymlinkHandler and fills it dotfiles' status information
-    fn try_new() -> Result<Self, ExitCode> {
-        let dotfiles_dir = match dotfiles::get_dotfiles_path() {
+    fn try_new(output: &mut String) -> Result<Self, ExitCode> {
+        let dotfiles_dir = match dotfiles::get_dotfiles_path(output) {
             Ok(dir) => dir,
             Err(e) => {
-                eprintln!("{e}");
+                output.push_str(&e.to_string());
                 return Err(ReturnCode::CouldntFindDotfiles.into());
             }
         };
@@ -95,7 +94,7 @@ impl SymlinkHandler {
         };
 
         // this fills the symlinker with dotfile status information
-        symlinker.validate()
+        symlinker.validate(output)
     }
 
     /// **This function should not be used outside this scope**
@@ -104,7 +103,7 @@ impl SymlinkHandler {
     /// into the struct
     ///
     /// Returns a copy of self with all the fields set accordingly
-    fn validate(mut self) -> Result<Self, ExitCode> {
+    fn validate(mut self, output: &mut String) -> Result<Self, ExitCode> {
         let configs_dir = Dotfile::try_from(self.dotfiles_dir.join("Configs")).unwrap();
 
         let mut symlinked = HashCache::new();
@@ -118,13 +117,13 @@ impl SymlinkHandler {
                 return;
             }
 
-            let target = f.to_target_path();
+            let target = f.to_target_path(output);
 
             if target.is_symlink() {
                 let link = match fs::read_link(target) {
                     Ok(link) => link,
                     Err(err) => {
-                        eprintln!("{err}");
+                        output.push_str(&err.to_string());
                         return;
                     }
                 };
@@ -260,12 +259,12 @@ impl SymlinkHandler {
             let group = Dotfile::try_from(self.dotfiles_dir.join("Configs").join(&group)).unwrap();
             if group.path.exists() {
                 // iterate through all the files in group_dir
-                group.map(|f| { symlink_file(f.path); } );
+                group.map(|f| { symlink_file(f.path, output); } );
             } else {
                 output.push_str(&format!(
                     "{} {}",
-                    "There's no dotfiles for".red(),
-                    group.group_name.red()
+                    "There's no dotfiles for",
+                    group.group_name,
                 ))
             }
         }
@@ -273,9 +272,9 @@ impl SymlinkHandler {
 
     /// Deletes symlinks from $HOME if they're owned by dotfiles dir
     fn remove(&self, group: &str, output: &mut String) {
-        fn remove_symlink(file: PathBuf) {
+        fn remove_symlink(file: PathBuf, output: &mut String) {
             let dotfile = Dotfile::try_from(file).unwrap();
-            let target_dotfile = dotfile.to_target_path();
+            let target_dotfile = dotfile.to_target_path(output);
             let Ok(linked) = fs::read_link(&target_dotfile) else {
                 return;
             };
@@ -303,15 +302,12 @@ impl SymlinkHandler {
             let group = Dotfile::try_from(self.dotfiles_dir.join("Configs").join(&group)).unwrap();
 
             if !group.path.exists() {
-                eprintln!(
-                    "{} {}",
-                    "There's no group called".red(),
-                    group.group_name.red()
-                );
+                output.push_str("There's no group called ");
+                output.push_str(&group.group_name);
                 continue;
             }
 
-            group.map(|f| remove_symlink(f.path));
+            group.map(|f| remove_symlink(f.path, output));
         }
     }
 }
@@ -334,12 +330,13 @@ where
     F: Fn(&SymlinkHandler, &String, &mut String),
 {
     // loads the runtime information needed to carry out actions
-    let sym = SymlinkHandler::try_new()?;
+    let sym = SymlinkHandler::try_new(output)?;
 
     // detect if user provided an invalid group
-    if let Some(invalid_groups) = dotfiles::check_invalid_groups(DotfileType::Configs, groups) {
+    if let Some(invalid_groups) = dotfiles::check_invalid_groups(DotfileType::Configs, groups, output) {
         for group in invalid_groups {
-            eprintln!("{}", format!("{group} doesn't exist.").red());
+            output.push_str(&group);
+            output.push_str(" doesn't exist.");
         }
         return Err(ReturnCode::NoSetupFolder.into());
     }
@@ -382,36 +379,37 @@ pub fn add_cmd(
     exclude: &[String],
     force: bool,
     adopt: bool,
-) -> Result<String, ExitCode> {
-    if force || adopt {
-        std::io::stdout()
-            .flush()
-            .expect("Could not print to stdout");
+) -> (String, ExitCode) {
+    // & This is done in the ui
+    // if force || adopt {
+    //     std::io::stdout()
+    //         .flush()
+    //         .expect("Could not print to stdout");
 
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .expect("Could not read from stdin");
+    //     let mut answer = String::new();
+    //     std::io::stdin()
+    //         .read_line(&mut answer)
+    //         .expect("Could not read from stdin");
 
-        match answer.trim().to_lowercase().as_str() {
-            "y" | "yes" => (),
-            _ => return Ok("".into()),
-        }
-    }
+    //     match answer.trim().to_lowercase().as_str() {
+    //         "y" | "yes" => (),
+    //         _ => return Ok("".into()),
+    //     }
+    // }
 
     let mut output = "".to_string();
 
-    foreach_group(groups, exclude, true, &mut output, |sym: &SymlinkHandler, group, mut output| {
+    let for_group = foreach_group(groups, exclude, true, &mut output, |sym: &SymlinkHandler, group, mut output| {
         // Symlink dotfile by force
         if force {
-            let remove_overlapping_files = |status_group: &HashCache| {
+            let mut remove_overlapping_files = |status_group: &HashCache| {
                 for (group, group_files) in status_group {
                     if !groups.contains(group) {
                         continue;
                     }
 
                     for file in group_files {
-                        let target_file = file.to_target_path();
+                        let target_file = file.to_target_path(output);
                         if target_file.is_dir() {
                             fs::remove_dir_all(target_file).unwrap();
                         } else if target_file.is_file() {
@@ -427,14 +425,14 @@ pub fn add_cmd(
 
         // Discard dotfile and adopt the conflicting dotfile
         if adopt {
-            let adopt_overlapping_files = |status_group: &HashCache| {
+            let mut adopt_overlapping_files = |status_group: &HashCache| {
                 for (group, group_files) in status_group {
                     if !groups.contains(group) {
                         continue;
                     }
 
                     for file in group_files {
-                        let target_file = file.to_target_path();
+                        let target_file = file.to_target_path(output);
                         if target_file.is_dir() {
                             fs::remove_dir_all(&file.path).unwrap();
                         } else if target_file.is_file() {
@@ -451,27 +449,32 @@ pub fn add_cmd(
         }
 
         sym.add(group, &mut output);
-    })?;
+    });
 
-    Ok(output)
+    match for_group {
+        Ok(()) => (output, ExitCode::SUCCESS),
+        Err(e) => (output, e),
+    }
 }
 
 /// Removes symlinks
-pub fn remove_cmd(groups: &[String], exclude: &[String]) -> Result<String, ExitCode> {
+pub fn remove_cmd(groups: &[String], exclude: &[String]) ->(String, ExitCode) {
     let mut output: String = "".into();
-    foreach_group(groups, exclude, false, &mut output,
-        |sym, p, mut output| sym.remove(p, &mut output))?;
-    Ok("".into())
+    match foreach_group(groups, exclude, false, &mut output,
+        |sym, p, mut output| sym.remove(p, &mut output)) {
+            Ok(()) => (output, ExitCode::SUCCESS),
+            Err(e) => (output, e),
+        }
 }
 
 /// returns a cache with files in dotfiles that already exist in $HOME
-fn get_conflicts_in_cache(cache: &HashCache) -> HashCache {
+fn get_conflicts_in_cache(cache: &HashCache, output: &mut String) -> HashCache {
     let mut conflicts = HashCache::new();
 
     // mark group as conflicting if at least one value already exists in $HOME
     for files in cache.values() {
         for file in files {
-            if !file.to_target_path().exists() || !file.is_valid_target() {
+            if !file.to_target_path(output).exists() || !file.is_valid_target() {
                 continue;
             }
 
@@ -555,7 +558,7 @@ fn print_global_status(sym: &SymlinkHandler, output: &mut String) -> Result<(), 
     };
 
     // --- detect conflicts ---
-    let conflicts = get_conflicts_in_cache(&sym.not_symlinked);
+    let conflicts = get_conflicts_in_cache(&sym.not_symlinked, output);
     // whether a conflict is a symlink or a pre-existing file does not matter for global status
     // so we just add them together
     let conflicts: HashSet<_> = conflicts.keys().chain(sym.not_owned.keys()).collect();
@@ -570,11 +573,11 @@ fn print_global_status(sym: &SymlinkHandler, output: &mut String) -> Result<(), 
         .with(Style::rounded())
         .with(Margin::new(4, 4, 1, 1))
         .with(Modify::new(Rows::first()).with(Format::new(|s| s.default_color().to_string())))
-        .with(Modify::new(Columns::single(0)).with(Format::new(|s| s.green().to_string())))
-        .with(Modify::new(Columns::single(1)).with(Format::new(|s| s.red().to_string())));
+        .with(Modify::new(Columns::single(0)).with(Format::new(|s| s.to_string())))
+        .with(Modify::new(Columns::single(1)).with(Format::new(|s| s.to_string())));
 
     let mut conflict_table = Table::builder(&conflicts)
-        .set_columns(["Conflicting Dotfiles".yellow().to_string()])
+        .set_columns(["Conflicting Dotfiles".to_string()])
         .clone()
         .build();
     conflict_table
@@ -603,8 +606,7 @@ fn print_global_status(sym: &SymlinkHandler, output: &mut String) -> Result<(), 
     }
 }
 
-fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<String, ExitCode> {
-    let mut output = "".to_string();
+fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>, output: &mut String) -> Result<(), ExitCode> {
     let mut get_related_groups =
         |sym: &SymlinkHandler, not_symlinked_groups: Option<&Vec<String>>| -> Vec<String> {
             let mut related_groups = Vec::new();
@@ -671,7 +673,7 @@ fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<Stri
     };
 
     if !not_symlinked.is_empty() || !not_owned.is_empty() {
-        let print_conflicts = |conflicts_cache: &HashCache, group: &str, msg: &str| {
+        let print_conflicts = |conflicts_cache: &HashCache, group: &str, msg: &str, output: &mut String| {
             let Some(conflicts) = conflicts_cache.get(group) else {
                 return;
             };
@@ -681,45 +683,47 @@ fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<Stri
                     continue;
                 }
 
-                let conflict = file.to_target_path();
-                println!("\t\t-> {} ({})", conflict.display(), msg,);
+                let conflict = file.to_target_path(output);
+                output.push_str("\t\t-> ");
+                output.push_str(conflict.to_str().unwrap_or(""));
+                output.push_str(&msg);
             }
         };
 
-        let file_conflicts = get_conflicts_in_cache(&sym.not_symlinked);
+        let file_conflicts = get_conflicts_in_cache(&sym.not_symlinked, output);
 
-        println!("Not Symlinked:");
+        output.push_str("Not Symlinked:");
         for group in &not_symlinked {
-            println!("\t{}", group.red());
-            print_conflicts(&file_conflicts, group, "already exists");
-            print_conflicts(&sym.not_owned, group, "symlinks elsewhere");
+            output.push_str("\t");
+            output.push_str(&group);
+            print_conflicts(&file_conflicts, group, "already exists", output);
+            print_conflicts(&sym.not_owned, group, "symlinks elsewhere", output);
         }
-
-        println!();
     }
 
     if !symlinked.is_empty() {
-        println!("Symlinked:");
+        output.push_str("Symlinked:");
         for group in symlinked {
-            println!("\t{}", group.green());
+            output.push_str("\t");
+            output.push_str(&group);
         }
-        println!();
     }
 
     if !unsupported.is_empty() {
-        println!("Not supported on this platform:");
+        output.push_str("Not supported on this platform:");
         for group in unsupported {
-            output.push_str(&format!("\t{}", group));
+            output.push_str("\t");
+            output.push_str(&group);
         };
     }
 
-    let invalid_groups = dotfiles::check_invalid_groups(DotfileType::Configs, &groups);
+    let invalid_groups = dotfiles::check_invalid_groups(DotfileType::Configs, &groups, output);
     if let Some(invalid_groups) = &invalid_groups {
         output.push_str("Following groups do not exist:");
         for group in invalid_groups {
-            output.push_str(&format!("\t{}", group));
+            output.push_str("\t");
+            output.push_str(&group);
         }
-        println!();
     }
 
     if !not_symlinked.is_empty() {
@@ -730,32 +734,41 @@ fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<Stri
         return Err(ReturnCode::NoSetupFolder.into());
     }
 
-    Ok(output)
+    Ok(())
 }
 
 /// Prints symlinking status
-pub fn status_cmd(groups: Option<Vec<String>>) -> Result<String, ExitCode> {
-    let mut output = "stats".to_string();
-    let sym = SymlinkHandler::try_new()?;
+pub fn status_cmd(groups: Option<Vec<String>>) -> (String, ExitCode) {
+    let mut output = "stats\n".to_string();
+    let sym = match SymlinkHandler::try_new(&mut output) {
+        Ok(sm) => sm,
+        Err(e) => return (output, e),
+    };
 
     if sym.is_empty() {
-        output.push_str("To get started: add dotfiles using `tuckr push` or add them manually to dotfiles/Configs.");
-        return Err(ReturnCode::NoSetupFolder.into());
+        output.push_str("To get started: add dotfiles using `tuckr push` or add them manually to dotfiles/Configs.\n");
+        return (output, ReturnCode::NoSetupFolder.into());
     }
 
     match groups {
-        Some(groups) => output.push_str(&print_groups_status(&sym, groups)?),
-        None => print_global_status(&sym, &mut output)?,
+        Some(groups) => match print_groups_status(&sym, groups, &mut output) {
+            Ok(()) => (),
+            Err(e) => return (output, e),
+        },
+        None => match print_global_status(&sym, &mut output) {
+            Ok(()) => (),
+            Err(e) => return (output, e),
+        },
     }
 
-    Ok(output)
+    (output, ExitCode::SUCCESS)
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         fs::{self, File},
-        io::Write,
+        io::Write, process::ExitCode,
     };
 
     use owo_colors::OwoColorize;
@@ -764,12 +777,14 @@ mod tests {
 
     use super::SymlinkHandler;
 
-    struct Test;
+    struct Test(String);
 
     impl Test {
         fn start() -> Self {
-            crate::fileops::init_cmd().unwrap();
-            let dotfiles_dir = dotfiles::get_dotfiles_path().unwrap();
+            let mut output = "".to_string();
+
+            crate::fileops::init_cmd();
+            let dotfiles_dir = dotfiles::get_dotfiles_path(&mut output).unwrap();
             let group_dir = dotfiles_dir.join("Configs").join("Group1");
 
             let new_config_dir = group_dir.join(".config");
@@ -784,15 +799,17 @@ mod tests {
             let _ = file2
                 .write("Some random content on file".as_bytes())
                 .unwrap();
-            Self
+            Self(output)
         }
     }
 
     impl Drop for Test {
         fn drop(&mut self) {
+            let mut output = "".to_string();
+
             _ = super::remove_cmd(&["*".to_string()], &[]);
-            let Ok(dotfiles_dir) = dotfiles::get_dotfiles_path() else {
-                eprintln!("{}", "Failed to clean up test.".red());
+            let Ok(dotfiles_dir) = dotfiles::get_dotfiles_path(&mut output) else {
+                output.push_str("Failed to clean up test.");
                 return;
             };
 
@@ -803,34 +820,34 @@ mod tests {
     }
 
     fn test_adding_symlink() {
-        let _test = Test::start();
+        let mut test = Test::start();
 
-        let sym = SymlinkHandler::try_new().unwrap();
+        let sym = SymlinkHandler::try_new(&mut test.0).unwrap();
         assert!(
             !sym.not_symlinked.is_empty() || !sym.symlinked.is_empty() || !sym.not_owned.is_empty()
         );
 
         assert!(!sym.symlinked.contains_key("Group1"));
-        super::add_cmd(&["Group1".to_string()], &[], false, false).unwrap();
+        super::add_cmd(&["Group1".to_string()], &[], false, false);
 
-        let sym = SymlinkHandler::try_new().unwrap();
+        let sym = SymlinkHandler::try_new(&mut test.0).unwrap();
         assert!(sym.symlinked.contains_key("Group1"));
     }
 
     fn test_removing_symlink() {
-        let _test = Test::start();
+        let mut test = Test::start();
 
-        super::add_cmd(&["Group1".to_string()], &[], false, false).unwrap();
+        super::add_cmd(&["Group1".to_string()], &[], false, false);
 
-        let sym = SymlinkHandler::try_new().unwrap();
+        let sym = SymlinkHandler::try_new(&mut test.0).unwrap();
         assert!(
             !sym.not_symlinked.is_empty() || !sym.symlinked.is_empty() || !sym.not_owned.is_empty()
         );
 
         assert!(!sym.not_symlinked.contains_key("Group1"));
 
-        super::remove_cmd(&["Group1".to_string()], &[]).unwrap();
-        let sym = SymlinkHandler::try_new().unwrap();
+        super::remove_cmd(&["Group1".to_string()], &[]);
+        let sym = SymlinkHandler::try_new(&mut test.0).unwrap();
         assert!(sym.not_symlinked.contains_key("Group1"));
     }
 

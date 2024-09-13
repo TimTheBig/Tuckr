@@ -21,3 +21,4 @@ sha2 = "0.10"
 tabled = {version = "0.10", features = ["color"]}
 walkdir = "2.3"
 zeroize = "1.5"
+thiserror = "1.0"

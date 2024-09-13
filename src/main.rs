@@ -16,6 +16,7 @@ pub mod secrets;
 pub mod symlinks;
 
 use clap::Parser;
+use dotfiles::ReturnCode;
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
@@ -125,7 +126,7 @@ pub enum Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let exit_code: Result<String, ExitCode> = match cli {
+    let exit_code: (String, ExitCode) = match cli {
         Cli::Set {
             groups,
             exclude,
@@ -153,8 +154,5 @@ fn main() -> ExitCode {
         Cli::GroupIs { files } => fileops::groupis_cmd(&files),
     };
 
-    match exit_code {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(e) => e,
-    }
+    exit_code.1
 }

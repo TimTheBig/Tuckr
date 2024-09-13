@@ -602,6 +602,7 @@ dependencies = [
  "rpassword",
  "sha2",
  "tabled",
+ "thiserror",
  "walkdir",
  "zeroize",
 ]

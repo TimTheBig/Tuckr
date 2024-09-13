@@ -36,13 +36,13 @@ where
 }
 
 /// Converts a stow directory into a tuckr directory
-pub fn from_stow_cmd() -> Result<String, ExitCode> {
+pub fn from_stow_cmd() -> (String, ExitCode) {
     let mut output = "".to_string();
-    let dotfiles_dir = match dotfiles::get_dotfiles_path() {
+    let dotfiles_dir = match dotfiles::get_dotfiles_path(&mut output) {
         Ok(path) => path,
         Err(e) => {
-            output.push_str(&e);
-            return Err(ReturnCode::NoSetupFolder.into());
+            output.push_str(&e.to_string());
+            return (output, ReturnCode::NoSetupFolder.into());
         }
     };
 
@@ -52,7 +52,8 @@ pub fn from_stow_cmd() -> Result<String, ExitCode> {
     let mut answer = String::new();
     io::stdin().read_line(&mut answer).unwrap();
     if !matches!(answer.trim().to_lowercase().as_str(), "yes" | "y") {
-        return Ok("User did not aceept confirmation".into());
+        output.push_str(&"User did not aceept confirmation");
+        return (output, ExitCode::FAILURE)
     }
 
     // --- initializing required directory ---
@@ -62,7 +63,7 @@ pub fn from_stow_cmd() -> Result<String, ExitCode> {
     // --- Moving dotfiles to Configs/ ---
     let cwd = match fs::read_dir(&dotfiles_dir) {
         Ok(dir) => dir,
-        Err(e) => { output.push_str("Could not open current directory"); return Err(ExitCode::FAILURE);}
+        Err(e) => { output.push_str("Could not open current directory"); return (output, ExitCode::FAILURE);}
     };
 
     for file in cwd {
@@ -86,24 +87,24 @@ pub fn from_stow_cmd() -> Result<String, ExitCode> {
         }
     }
 
-    Ok(output)
+    (output, ExitCode::SUCCESS)
 }
 
 /// Creates the necessary files and folders for a tuckr directory if they don't exist
-pub fn init_cmd() -> Result<String, ExitCode> {
+pub fn init_cmd() -> (String, ExitCode) {
     let mut output = "".to_string();
     macro_rules! create_dirs {
         ($($dirname: expr),+) => {
             $(
             if let Err(e) = fs::create_dir_all($dirname) {
                 output.push_str(&e.to_string());
-                return Err(ExitCode::FAILURE);
+                return (output, ExitCode::FAILURE);
             })+
         };
     }
 
     let dotfiles_dir = if cfg!(test) {
-        dotfiles::get_dotfiles_path().unwrap()
+        dotfiles::get_dotfiles_path(&mut output).unwrap()
     } else {
         dirs::config_dir().unwrap().join("dotfiles")
     };
@@ -120,16 +121,16 @@ pub fn init_cmd() -> Result<String, ExitCode> {
         )
     );
 
-    Ok(output)
+    (output, ExitCode::SUCCESS)
 }
 
-pub fn push_cmd(group: String, files: &[String]) -> Result<String, ExitCode> {
+pub fn push_cmd(group: String, files: &[String]) -> (String, ExitCode) {
     let mut output = "".to_string();
-    let dotfiles_dir = match dotfiles::get_dotfiles_path() {
+    let dotfiles_dir = match dotfiles::get_dotfiles_path(&mut output) {
         Ok(dir) => dir.join("Configs").join(group),
         Err(e) => {
-            output.push_str(&e);
-            return Err(ReturnCode::CouldntFindDotfiles.into());
+            output.push_str(&e.to_string());
+            return (output, ReturnCode::CouldntFindDotfiles.into());
         }
     };
 
@@ -176,19 +177,19 @@ pub fn push_cmd(group: String, files: &[String]) -> Result<String, ExitCode> {
     }
 
     if any_file_failed {
-        Err(ReturnCode::NoSuchFileOrDir.into())
+        (output, ReturnCode::NoSuchFileOrDir.into())
     } else {
-        Ok(output)
+        (output, ExitCode::SUCCESS)
     }
 }
 
-pub fn pop_cmd(groups: &[String]) -> Result<String, ExitCode> {
+pub fn pop_cmd(groups: &[String]) -> (String, ExitCode) {
     let mut output = "".to_string();
-    let dotfiles_dir = match dotfiles::get_dotfiles_path() {
+    let dotfiles_dir = match dotfiles::get_dotfiles_path(&mut output) {
         Ok(dir) => dir.join("Configs"),
         Err(e) => {
-            output.push_str(&e);
-            return Err(ReturnCode::CouldntFindDotfiles.into());
+            output.push_str(&e.to_string());
+            return (output, e.into());
         }
     };
 
@@ -214,7 +215,7 @@ pub fn pop_cmd(groups: &[String]) -> Result<String, ExitCode> {
             output.push_str(" does not exist.");
         }
 
-        return Err(ReturnCode::NoSuchFileOrDir.into());
+        return (output, ReturnCode::NoSuchFileOrDir.into());
     }
 
     output.push_str("The following groups will be removed:");
@@ -229,29 +230,29 @@ pub fn pop_cmd(groups: &[String]) -> Result<String, ExitCode> {
     let confirmed = matches!(confirmation.trim().to_lowercase().as_str(), "y" | "yes");
 
     if !confirmed {
-        return Ok(output);
+        return (output, ExitCode::FAILURE);
     }
 
     for group_path in valid_groups {
         fs::remove_dir_all(group_path).unwrap();
     }
 
-    Ok(output)
+    (output, ExitCode::SUCCESS)
 }
 
-pub fn ls_hooks_cmd() -> Result<String, ExitCode> {
+pub fn ls_hooks_cmd() -> (String, ExitCode) {
     let mut output = "".to_string();
-    let dir = match dotfiles::get_dotfiles_path() {
+    let dir = match dotfiles::get_dotfiles_path(&mut output) {
         Ok(dir) => dir.join("Hooks"),
-        Err(err) => {
-            output.push_str(&err);
-            return Err(ReturnCode::CouldntFindDotfiles.into());
+        Err(e) => {
+            output.push_str(&e.to_string());
+            return (output, ReturnCode::CouldntFindDotfiles.into());
         }
     };
 
     if !dir.exists() {
         output.push_str("There's no directory setup for Hooks");
-        return Err(ReturnCode::NoSetupFolder.into());
+        return (output, ReturnCode::NoSetupFolder.into());
     }
 
     #[derive(Tabled)]
@@ -267,8 +268,8 @@ pub fn ls_hooks_cmd() -> Result<String, ExitCode> {
     let dir = fs::read_dir(dir).unwrap();
     let mut rows = Vec::new();
 
-    let true_symbol = "✓".green().to_string();
-    let false_symbol = "✗".red().to_string();
+    let true_symbol = "✓".to_string();
+    let false_symbol = "✗".to_string();
 
     for hook in dir {
         let hook_dir = hook.unwrap();
@@ -296,7 +297,7 @@ pub fn ls_hooks_cmd() -> Result<String, ExitCode> {
 
     if rows.is_empty() {
         output.push_str("No hooks have been set up yet.");
-        return Ok(output);
+        return (output, ExitCode::SUCCESS);
     }
 
     use tabled::{Margin, Style};
@@ -308,35 +309,35 @@ pub fn ls_hooks_cmd() -> Result<String, ExitCode> {
         .with(Modify::new(Segment::new(1.., 1..)).with(Alignment::center()));
     output.push_str(&hooks_list.to_string());
 
-    Ok(output)
+    (output, ExitCode::SUCCESS)
 }
 
 // todo: make ls-secrets command prettier
-pub fn ls_secrets_cmd() -> Result<String, ExitCode> {
+pub fn ls_secrets_cmd() -> (String, ExitCode) {
     let mut output = "".to_string();
-    let secrets_dir = match dotfiles::get_dotfiles_path() {
+    let secrets_dir = match dotfiles::get_dotfiles_path(&mut output) {
         Ok(p) => p.join("Secrets"),
-        Err(e) => { output.push_str(&e); return Ok(output); },
+        Err(e) => { output.push_str(&e.to_string()); return (output, e.into()); },
     };
 
     let Ok(secrets) = secrets_dir.read_dir() else {
-        return Err(ReturnCode::NoSetupFolder.into());
+        return (output, ReturnCode::NoSetupFolder.into());
     };
 
     for secret in secrets {
         let secret = secret.unwrap();
-        println!("{}", secret.file_name().to_str().unwrap());
+        output.push_str(secret.file_name().to_str().unwrap());
     }
-    Ok(output)
+    (output, ExitCode::SUCCESS)
 }
 
-pub fn groupis_cmd(files: &[String]) -> Result<String, ExitCode> {
+pub fn groupis_cmd(files: &[String]) -> (String, ExitCode) {
     let mut output: String = "".into();
-    let dotfiles_dir = match dotfiles::get_dotfiles_path() {
+    let dotfiles_dir = match dotfiles::get_dotfiles_path(&mut output) {
         Ok(path) => path,
         Err(e) => {
-            output.push_str(&e);
-            return Err(ReturnCode::NoSetupFolder.into());
+            output.push_str(&e.to_string());
+            return (output, ReturnCode::NoSetupFolder.into());
         }
     }
     .join("Configs");
@@ -357,18 +358,20 @@ pub fn groupis_cmd(files: &[String]) -> Result<String, ExitCode> {
     'next_file: for file in files {
         let mut file_path = PathBuf::from(file);
         if !file_path.exists() {
-            eprintln!("{}", format!("`{file} does not exist.`").red());
+            output.push_str(&file);
+            output.push_str(" does not exist.");
             continue;
         }
 
         if let Ok(dotfile) = dotfiles::Dotfile::try_from(file_path.clone()) {
-            println!("{}", dotfile.group_name);
+            output.push_str(&dotfile.group_name);
             continue;
         }
 
         while !file_path.is_symlink() {
             if !file_path.pop() {
-                output.push_str(&format!("`{file}` is not a tuckr dotfile."));
+                output.push_str(&file);
+                output.push_str(" is not a tuckr dotfile.");
                 break 'next_file;
             }
         }
@@ -385,15 +388,15 @@ pub fn groupis_cmd(files: &[String]) -> Result<String, ExitCode> {
             let dotfile = match dotfiles::Dotfile::try_from(dotfile_path) {
                 Ok(dotfile) => dotfile,
                 Err(err) => {
-                    eprintln!("{err}");
+                    output.push_str(&err);
                     continue;
                 }
             };
 
-            println!("{}", dotfile.group_name);
+            output.push_str(&dotfile.group_name);
 
-            return Ok(dotfile.group_name);
+            return (output, ExitCode::SUCCESS);
         }
     }
-    Ok(output)
+    (output, ExitCode::SUCCESS)
 }
