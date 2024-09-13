@@ -289,8 +289,8 @@ impl SymlinkHandler {
             } else {
                 match fs::remove_file(&target_dotfile)
                 .map_err(|err| format!("error with path `{}`: {err}", target_dotfile.display())) {
-                    Ok(()) => (),
-                    Err(s) => {|output: &mut String| output.push_str(&s); ()}
+                    Ok(_) => (),
+                    Err(s) => { |output: &mut String| output.push_str(&s); ()}
                 }
             }
         }
@@ -450,7 +450,7 @@ pub fn add_cmd(
             adopt_overlapping_files(&sym.not_symlinked);
         }
 
-        &sym.add(group, &mut output);
+        sym.add(group, &mut output);
     })?;
 
     Ok(output)
@@ -484,7 +484,7 @@ fn get_conflicts_in_cache(cache: &HashCache) -> HashCache {
     conflicts
 }
 
-fn print_global_status(sym: &SymlinkHandler) -> Result<String, ExitCode> {
+fn print_global_status(sym: &SymlinkHandler, output: &mut String) -> Result<(), ExitCode> {
     #[derive(Tabled, Debug)]
     struct SymlinkRow<'a> {
         #[tabled(rename = "Symlinked")]
@@ -493,7 +493,6 @@ fn print_global_status(sym: &SymlinkHandler) -> Result<String, ExitCode> {
         #[tabled(rename = "Not Symlinked")]
         not_symlinked: &'a str,
     }
-    let mut output = "".to_string();
 
     // --- process status from symlink ---
     // groups that are both in symlinked and not_symlinked
@@ -598,7 +597,7 @@ fn print_global_status(sym: &SymlinkHandler) -> Result<String, ExitCode> {
 
     // Determines exit code for the command based on the dotfiles' status
     if !symlinked.is_empty() && not_symlinked.is_empty() && conflicts.is_empty() {
-        Ok(output)
+        Ok(())
     } else {
         Err(ExitCode::FAILURE)
     }
@@ -606,7 +605,7 @@ fn print_global_status(sym: &SymlinkHandler) -> Result<String, ExitCode> {
 
 fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<String, ExitCode> {
     let mut output = "".to_string();
-    let get_related_groups =
+    let mut get_related_groups =
         |sym: &SymlinkHandler, not_symlinked_groups: Option<&Vec<String>>| -> Vec<String> {
             let mut related_groups = Vec::new();
 
@@ -642,6 +641,9 @@ fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<Stri
 
             related_groups.sort();
             related_groups.dedup();
+            for group in &related_groups {
+                output.push_str(group);
+            }
             related_groups
         };
 
@@ -733,18 +735,17 @@ fn print_groups_status(sym: &SymlinkHandler, groups: Vec<String>) -> Result<Stri
 
 /// Prints symlinking status
 pub fn status_cmd(groups: Option<Vec<String>>) -> Result<String, ExitCode> {
-    let mut output = "".to_string();
+    let mut output = "stats".to_string();
     let sym = SymlinkHandler::try_new()?;
 
     if sym.is_empty() {
-        output.push_str("No dotfiles have been setup yet");
-        println!("To get started: add dotfiles using `tuckr push` or add them manually to dotfiles/Configs.");
+        output.push_str("To get started: add dotfiles using `tuckr push` or add them manually to dotfiles/Configs.");
         return Err(ReturnCode::NoSetupFolder.into());
     }
 
     match groups {
         Some(groups) => output.push_str(&print_groups_status(&sym, groups)?),
-        None => output.push_str(&print_global_status(&sym)?),
+        None => print_global_status(&sym, &mut output)?,
     }
 
     Ok(output)

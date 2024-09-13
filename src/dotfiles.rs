@@ -30,6 +30,7 @@ pub const VALID_TARGETS: &[&str] = &[
 
 // Exit codes
 /// Couldn't find the dotfiles directory
+#[derive(Debug)]
 pub enum ReturnCode {
     CouldntFindDotfiles = 2,
     /// No Configs/Hooks/Secrets folder setup
