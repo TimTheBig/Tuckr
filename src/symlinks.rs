@@ -572,7 +572,7 @@ fn print_global_status(sym: &SymlinkHandler, output: &mut String) -> Result<(), 
     sym_table
         .with(Style::rounded())
         .with(Margin::new(4, 4, 1, 1))
-        .with(Modify::new(Rows::first()).with(Format::new(|s| s.default_color().to_string())))
+        .with(Modify::new(Rows::first()).with(Format::new(|s| s.to_string())))
         .with(Modify::new(Columns::single(0)).with(Format::new(|s| s.to_string())))
         .with(Modify::new(Columns::single(1)).with(Format::new(|s| s.to_string())));
 
