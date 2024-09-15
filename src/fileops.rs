@@ -46,16 +46,6 @@ pub fn from_stow_cmd() -> (String, ExitCode) {
         }
     };
 
-    // --- Getting user confirmation ---
-    io::stdout().flush().unwrap();
-
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer).unwrap();
-    if !matches!(answer.trim().to_lowercase().as_str(), "yes" | "y") {
-        output.push_str(&"User did not aceept confirmation");
-        return (output, ExitCode::FAILURE)
-    }
-
     // --- initializing required directory ---
     let configs_path = dotfiles_dir.join("Configs");
     fs::create_dir_all(&configs_path).expect("Could not create required directory.");
@@ -161,18 +151,9 @@ pub fn push_cmd(group: String, files: &[String]) -> (String, ExitCode) {
                     fs::copy(file, target_file).unwrap();
                 });
             }
-        } else {
-            
-            std::io::stdout().flush().unwrap();
-            let mut confirmation = String::new();
-            std::io::stdin().read_line(&mut confirmation).unwrap();
-
-            let confirmed = matches!(confirmation.trim().to_lowercase().as_str(), "y" | "yes");
-
-            if confirmed {
-                fs::create_dir_all(target_dir).unwrap();
-                fs::copy(file, target_file).unwrap();
-            }
+        } else {            
+            fs::create_dir_all(target_dir).unwrap();
+            fs::copy(file, target_file).unwrap();
         }
     }
 
@@ -222,15 +203,6 @@ pub fn pop_cmd(groups: &[String]) -> (String, ExitCode) {
     for group in groups {
         output.push_str("\t");
         output.push_str(group);
-    }
-    std::io::stdout().flush().unwrap();
-    let mut confirmation = String::new();
-    std::io::stdin().read_line(&mut confirmation).unwrap();
-
-    let confirmed = matches!(confirmation.trim().to_lowercase().as_str(), "y" | "yes");
-
-    if !confirmed {
-        return (output, ExitCode::FAILURE);
     }
 
     for group_path in valid_groups {

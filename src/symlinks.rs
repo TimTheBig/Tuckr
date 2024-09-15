@@ -380,23 +380,6 @@ pub fn add_cmd(
     force: bool,
     adopt: bool,
 ) -> (String, ExitCode) {
-    // & This is done in the ui
-    // if force || adopt {
-    //     std::io::stdout()
-    //         .flush()
-    //         .expect("Could not print to stdout");
-
-    //     let mut answer = String::new();
-    //     std::io::stdin()
-    //         .read_line(&mut answer)
-    //         .expect("Could not read from stdin");
-
-    //     match answer.trim().to_lowercase().as_str() {
-    //         "y" | "yes" => (),
-    //         _ => return Ok("".into()),
-    //     }
-    // }
-
     let mut output = "".to_string();
 
     let for_group = foreach_group(groups, exclude, true, &mut output, |sym: &SymlinkHandler, group, mut output| {
